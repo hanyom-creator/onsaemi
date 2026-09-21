@@ -5,7 +5,7 @@ STT(3.1.2) 연동 완료. 마스킹(3.1.3) · 위험도·스크립트(LLM, 3.2.1
 import asyncio
 import time
 import uuid
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from datetime import datetime
 
 from fastapi import BackgroundTasks, FastAPI, Form, File, UploadFile, Header, HTTPException, Request
@@ -15,7 +15,15 @@ from fastapi.responses import StreamingResponse
 from . import db, sse, stt
 from .config import API_KEY, AUDIO_DIR, KEEP_AUDIO, CHUNK_TIMEOUT_SEC, SESSION_LIMIT_SEC
 
-app = FastAPI(title="Onsaemi API", version="0.1")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(timeout_watcher())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Onsaemi API", version="0.1", lifespan=lifespan)
 
 
 # ------------------------------------------------------------
@@ -152,18 +160,41 @@ async def stream(
     session_id: str,
     request: Request,
     x_api_key: str | None = Header(default=None),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
     check_api_key(x_api_key)
     validate_session_id(session_id)
+
+    # 먼저 구독해야 재전송 조회 중에 들어오는 실시간 이벤트를 놓치지 않는다 ([4]).
     queue = sse.subscribe(session_id)
+
+    try:
+        since_seq = int(last_event_id) if last_event_id is not None else None
+    except ValueError:
+        since_seq = None  # 형식이 이상하면 처음부터 재전송
+
+    # Last-Event-ID 가 있으면 그 이후, 없으면 세션 전체를 DB에서 재구성해 먼저 보낸다.
+    replay = await run_in_threadpool(db.get_events_since, session_id, since_seq)
+    # "마지막 seq 이하는 건너뛴다" 는 임계값 방식은 쓰지 않는다. 분석 완료 순서가
+    # seq 순서와 다를 수 있어서(늦게 시작한 청크가 먼저 끝날 수 있다), 재전송
+    # 시점에 아직 안 끝난 낮은 seq 가 나중에 실시간으로 들어오면 유실된다.
+    # 그래서 재전송에서 실제로 보낸 seq 집합만 걸러낸다.
+    replayed_seqs = {payload["seq"] for payload in replay}
 
     async def event_gen():
         try:
+            for payload in replay:
+                yield sse.format_event(payload)
+
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    seq = payload.get("seq")
+                    # 재전송에서 이미 보낸 seq가 실시간으로 다시 오면 건너뛴다.
+                    if seq is not None and seq in replayed_seqs:
+                        continue
                     yield sse.format_event(payload)
                 except asyncio.TimeoutError:
                     # 연결 유지용 주석 프레임
@@ -227,8 +258,3 @@ async def timeout_watcher():
                     await sse.publish(sid, {"event": "session_ended", **result})
         except Exception as e:  # noqa: BLE001
             print(f"[timeout_watcher] {e}")
-
-
-@app.on_event("startup")
-async def on_startup():
-    asyncio.create_task(timeout_watcher())
