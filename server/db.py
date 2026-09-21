@@ -84,6 +84,7 @@ def save_utterance(
     recorded_at: str,
     transcript: Optional[str] = None,
     signals: Optional[list] = None,
+    stt_confidence: Optional[float] = None,
     score_delta: int = 0,
     score_total: Optional[int] = None,
     latency_ms: Optional[int] = None,
@@ -95,18 +96,53 @@ def save_utterance(
             conn.execute(
                 """INSERT INTO utterance
                    (session_id, seq, recorded_at, received_at, transcript,
-                    signals, score_delta, score_total, latency_ms, audio_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    signals, stt_confidence, score_delta, score_total, latency_ms, audio_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id, seq, recorded_at, now(), transcript,
                     json.dumps(signals, ensure_ascii=False) if signals else None,
-                    score_delta, score_total, latency_ms, audio_path,
+                    stt_confidence, score_delta, score_total, latency_ms, audio_path,
                 ),
             )
             return True
         except sqlite3.IntegrityError:
             # UNIQUE(session_id, seq) — 재전송된 중복 청크
             return False
+
+
+def get_events_since(session_id: str, since_seq: Optional[int]) -> list[dict]:
+    """분석이 끝난 청크 결과를 seq 오름차순으로 재구성한다 (SSE 재연결 재전송용).
+
+    실시간 publish 페이로드와 같은 형식을 유지한다. level/level_reason/script/
+    script_followed 는 3.2.1(위험도·스크립트) 구현 전까지는 실시간 쪽도 항상
+    스텁 값이라, script 테이블에 매칭되는 행이 없으면 그 스텁 값을 그대로 채운다.
+    """
+    floor_seq = since_seq if since_seq is not None else -1
+    with closing(get_conn()) as conn, conn:
+        rows = conn.execute(
+            """SELECT u.seq, u.transcript, u.signals, u.score_total, u.latency_ms,
+                      s.level, s.level_reason, s.content AS script, s.script_followed
+               FROM utterance u
+               LEFT JOIN script s ON s.session_id = u.session_id AND s.seq = u.seq
+               WHERE u.session_id = ? AND u.seq > ?
+               ORDER BY u.seq ASC""",
+            (session_id, floor_seq),
+        ).fetchall()
+
+    events = []
+    for r in rows:
+        events.append({
+            "seq": r["seq"],
+            "transcript": r["transcript"],
+            "risk_score": r["score_total"],
+            "level": r["level"] if r["level"] is not None else 0,
+            "level_reason": r["level_reason"] or "score",
+            "signals": json.loads(r["signals"]) if r["signals"] else [],
+            "script": r["script"],
+            "script_followed": r["script_followed"],
+            "latency_ms": r["latency_ms"],
+        })
+    return events
 
 
 def last_score_total(session_id: str) -> int:
