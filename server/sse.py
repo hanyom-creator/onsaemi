@@ -33,5 +33,13 @@ async def publish(session_id: str, payload: dict) -> None:
 
 
 def format_event(payload: dict) -> str:
-    """SSE 프레임 형식으로 직렬화."""
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    """SSE 프레임 형식으로 직렬화.
+
+    seq 가 있는 페이로드는 id 필드에 seq 를 실어, 앱이 재연결할 때
+    Last-Event-ID 헤더로 보내 재전송 시작점을 알려줄 수 있게 한다.
+    """
+    lines = []
+    if "seq" in payload:
+        lines.append(f"id: {payload['seq']}")
+    lines.append(f"data: {json.dumps(payload, ensure_ascii=False)}")
+    return "\n".join(lines) + "\n\n"
