@@ -84,6 +84,7 @@ def save_utterance(
     recorded_at: str,
     transcript: Optional[str] = None,
     signals: Optional[list] = None,
+    stt_confidence: Optional[float] = None,
     score_delta: int = 0,
     score_total: Optional[int] = None,
     latency_ms: Optional[int] = None,
@@ -95,12 +96,12 @@ def save_utterance(
             conn.execute(
                 """INSERT INTO utterance
                    (session_id, seq, recorded_at, received_at, transcript,
-                    signals, score_delta, score_total, latency_ms, audio_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    signals, stt_confidence, score_delta, score_total, latency_ms, audio_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id, seq, recorded_at, now(), transcript,
                     json.dumps(signals, ensure_ascii=False) if signals else None,
-                    score_delta, score_total, latency_ms, audio_path,
+                    stt_confidence, score_delta, score_total, latency_ms, audio_path,
                 ),
             )
             return True

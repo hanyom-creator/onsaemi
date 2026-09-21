@@ -3,3 +3,6 @@ uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 python-dotenv==1.0.1
 google-cloud-speech==2.40.0
+
+# tools/ 테스트 도구 전용
+requests==2.34.2
