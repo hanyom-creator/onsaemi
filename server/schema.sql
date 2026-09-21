@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS utterance (
     received_at     TEXT NOT NULL,              -- 서버 도착 시각
     transcript      TEXT,                       -- 마스킹 처리 후. STT 실패/무음이면 NULL
     signals         TEXT,                       -- JSON 배열 문자열  예: ["기관사칭","이체요구"]
+    stt_confidence  REAL,                       -- Google STT 신뢰도 0~1, 여러 구간이면 평균. 무음·실패면 NULL
     score_delta     INTEGER DEFAULT 0,          -- 이 청크에서 오른 점수 (6.3.2 지표)
     score_total     INTEGER,                    -- 이 시점까지 누적 총점 (5장 그래프 y축)
     latency_ms      INTEGER,                    -- 도착 → 결과 생성 (6.3.3 지표)

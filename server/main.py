@@ -111,7 +111,7 @@ async def analyze_and_publish(
     최소한 로그는 남겨서 조용히 청크가 사라지는 일이 없게 한다.
     """
     try:
-        transcript = await run_in_threadpool(stt.transcribe_wav, data)
+        transcript, stt_confidence = await run_in_threadpool(stt.transcribe_wav, data)
 
         # TODO 3.1.3  민감정보 탐지 → 신호 기록 → 치환
         signals: list[str] = []
@@ -128,6 +128,7 @@ async def analyze_and_publish(
             recorded_at=recorded_at,
             transcript=transcript,
             signals=signals or None,
+            stt_confidence=stt_confidence,
             score_delta=score_delta,
             score_total=score_total,
             latency_ms=latency_ms,

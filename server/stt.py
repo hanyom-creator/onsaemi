@@ -18,17 +18,26 @@ _config = speech.RecognitionConfig(
 _WAV_HEADER_LEN = 44  # 앱·서버 양쪽 다 표준 44바이트 PCM 헤더로 통일돼 있다.
 
 
-def transcribe_wav(wav_bytes: bytes) -> str | None:
-    """WAV 청크를 텍스트로 변환한다. 무음·인식 실패·키 미설정 시 None."""
+def transcribe_wav(wav_bytes: bytes) -> tuple[str | None, float | None]:
+    """WAV 청크를 텍스트로 변환한다. (transcript, confidence) 를 돌려준다.
+
+    무음·인식 실패·키 미설정 시 (None, None). confidence 는 결과 구간이
+    여럿이면 평균한다.
+    """
     if _client is None:
-        return None
+        return None, None
 
     audio = speech.RecognitionAudio(content=wav_bytes[_WAV_HEADER_LEN:])
     try:
         response = _client.recognize(config=_config, audio=audio)
     except Exception as e:  # noqa: BLE001
         print(f"[stt] recognize 실패: {e}")
-        return None
+        return None, None
 
-    texts = [r.alternatives[0].transcript for r in response.results if r.alternatives]
-    return " ".join(texts) if texts else None
+    alternatives = [r.alternatives[0] for r in response.results if r.alternatives]
+    if not alternatives:
+        return None, None
+
+    transcript = " ".join(a.transcript for a in alternatives)
+    confidence = sum(a.confidence for a in alternatives) / len(alternatives)
+    return transcript, confidence
