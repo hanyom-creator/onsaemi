@@ -1,6 +1,6 @@
 -- ============================================================
--- 온새미(Onsaemi) SQLite 스키마 v0.1
--- 작성일: 2026-09-15
+-- 온새미(Onsaemi) SQLite 스키마 v0.2
+-- 작성일: 2026-09-21
 -- WBS 1.2.3 — API 명세 · SQLite 스키마 · 아키텍처 설계도
 --
 -- 실행:  sqlite3 onsaemi.db < schema.sql
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS utterance (
     recorded_at     TEXT NOT NULL,              -- 앱의 녹음 시작 시각
     received_at     TEXT NOT NULL,              -- 서버 도착 시각
     transcript      TEXT,                       -- 마스킹 처리 후. STT 실패/무음이면 NULL
-    signals         TEXT,                       -- JSON 배열 문자열  예: ["기관사칭","이체압박"]
+    signals         TEXT,                       -- JSON 배열 문자열  예: ["기관사칭","이체요구"]
     score_delta     INTEGER DEFAULT 0,          -- 이 청크에서 오른 점수 (6.3.2 지표)
     score_total     INTEGER,                    -- 이 시점까지 누적 총점 (5장 그래프 y축)
     latency_ms      INTEGER,                    -- 도착 → 결과 생성 (6.3.3 지표)
@@ -75,8 +75,8 @@ CREATE TABLE IF NOT EXISTS script (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      TEXT NOT NULL,
     seq             INTEGER NOT NULL,           -- 근거가 된 청크 순번
-    level           INTEGER NOT NULL,           -- 1~4
-    level_reason    TEXT NOT NULL,              -- score | sensitive_pattern | timeout
+    level           INTEGER NOT NULL,           -- 1~5
+    level_reason    TEXT NOT NULL,              -- score | timeout | sensitive_pattern | critical_repeat
     content         TEXT NOT NULL,
     sent_at         TEXT NOT NULL,
     script_followed TEXT,                       -- yes | no | alternative | dismissive
