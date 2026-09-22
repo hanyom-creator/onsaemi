@@ -8,6 +8,7 @@ __pycache__/
 *.db-*
 *.wav
 server/audio/
+runs/
 android/.gradle/
 android/build/
 android/app/build/
