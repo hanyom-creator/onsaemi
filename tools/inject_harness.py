@@ -18,6 +18,9 @@
 
 외부 패키지 없이 Python 3.12 표준 라이브러리만 쓴다.
 
+tools\\send_chunks.py 는 S1 기록용으로 그대로 둔다 — session_ended 처리·
+STT 신뢰도 조회·인식 성공 개수 집계 기능은 이 파일로 옮겨와 이어받았다.
+
 사용 예 (D:\\onsaemi 에서):
   python tools\\inject_harness.py --make-tone test_tone.wav
   python tools\\inject_harness.py test_tone.wav --dry-run --overlap 0.5
@@ -28,6 +31,7 @@
   manifest.csv               청크별 원본 구간(초) — 경계 단어 소실 분석용
   send_log.csv               예정 시각, 전송 지연, 응답 코드, 전송 소요 시간
   events.jsonl               SSE 수신 이벤트 + 클라이언트 측 지연
+  confidence.csv             청크별 stt_confidence(DB 조회) · SSE로 받은 transcript
   run.json                   실행 조건
 """
 
@@ -44,6 +48,7 @@ import io
 import json
 import math
 import os
+import sqlite3
 import struct
 import sys
 import threading
@@ -223,8 +228,10 @@ class SSEListener(threading.Thread):
         self.sent_at = sent_at          # seq → 전송 시작 시각(perf_counter)
         self.log_path = log_path
         self.connected = threading.Event()
+        self.ended = threading.Event()  # session_ended 수신 여부
         self.error = None
         self.count = 0
+        self.transcripts: dict[int, str | None] = {}  # seq → SSE로 받은 transcript
 
     def run(self):
         req = urllib.request.Request(self.url, headers=self.client.headers({"Accept": "text/event-stream"}))
@@ -235,14 +242,16 @@ class SSEListener(threading.Thread):
                 data_lines = []
                 for raw in r:
                     line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                    if line.startswith(":"):
-                        continue  # keep-alive 주석
+                    if line.startswith(":") or line.startswith("id:"):
+                        continue  # keep-alive 주석 / 이벤트 id는 쓰지 않는다
                     if line.startswith("data:"):
                         data_lines.append(line[5:].lstrip())
                         continue
                     if line == "" and data_lines:
                         self.handle("\n".join(data_lines), log)
                         data_lines = []
+                        if self.ended.is_set():
+                            break
         except Exception as e:  # noqa: BLE001 — 연결 실패 원인을 그대로 보여준다
             self.error = e
             self.connected.set()
@@ -254,6 +263,14 @@ class SSEListener(threading.Thread):
         except json.JSONDecodeError:
             event = {"raw": payload}
 
+        if event.get("event") == "session_ended":
+            log.write(json.dumps({"received_at": now_iso(), "client_latency_ms": None, "event": event},
+                                 ensure_ascii=False) + "\n")
+            log.flush()
+            self.ended.set()
+            print("[SSE] session_ended 수신", flush=True)
+            return
+
         seq = event.get("seq")
         sent = self.sent_at.get(seq)
         client_ms = round((received - sent) * 1000) if sent is not None else None
@@ -262,6 +279,7 @@ class SSEListener(threading.Thread):
                              ensure_ascii=False) + "\n")
         log.flush()
         self.count += 1
+        self.transcripts[seq] = event.get("transcript")
 
         script = event.get("script")
         lines = [f"  ◀ seq {seq} | Lv{event.get('level')} | 점수 {event.get('risk_score')} | "
@@ -277,6 +295,27 @@ class SSEListener(threading.Thread):
 # ------------------------------------------------------------
 def now_iso() -> str:
     return dt.datetime.now(KST).isoformat(timespec="milliseconds")
+
+
+def fetch_confidences_ro(db_path: Path, session_id: str) -> dict[int, float | None] | None:
+    """utterance 테이블에서 stt_confidence 를 읽기 전용으로 조회한다.
+
+    반드시 mode=ro URI로 열어, 파일이 없을 때 sqlite3가 새 DB를 만들지 않게 한다.
+    파일이 없거나 열기/조회에 실패하면 None 을 돌려준다.
+    """
+    try:
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT seq, stt_confidence FROM utterance WHERE session_id = ? ORDER BY seq",
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {seq: confidence for seq, confidence in rows}
+    except sqlite3.Error:
+        return None
 
 
 def main():
@@ -297,6 +336,9 @@ def main():
     p.add_argument("--workers", type=int, default=4, help="동시 전송 스레드 수")
     p.add_argument("--timeout", type=float, default=10.0, help="요청 타임아웃(초)")
     p.add_argument("--api-key", default=os.environ.get("ONSAEMI_API_KEY"), help="X-API-Key (기본: 환경변수)")
+    p.add_argument("--db", type=Path,
+                   default=Path(__file__).resolve().parent.parent / "server" / "onsaemi.db",
+                   help="stt_confidence 조회용 DB 경로 (읽기 전용으로 엽니다)")
     p.add_argument("--out", type=Path, default=Path("runs"), help="결과 저장 상위 폴더")
     p.add_argument("--dry-run", action="store_true", help="전송하지 않고 분할 결과만 저장")
     p.add_argument("--make-tone", type=Path, metavar="PATH", help="테스트용 톤 WAV를 만들고 종료")
@@ -420,16 +462,45 @@ def main():
     if listener and not listener.error:
         print(f"[SSE] 남은 결과 최대 {args.drain:g}초 대기")
         deadline = time.perf_counter() + args.drain
-        while time.perf_counter() < deadline and listener.count < len(chunks):
+        while (time.perf_counter() < deadline
+               and listener.count < len(chunks)
+               and not listener.ended.is_set()):
             time.sleep(0.1)
 
     if not args.no_end:
         status, text = client.post_end(session_id, last_seq)
         print(f"[종료] /end → {status}  {text[:200]}")
 
+        if listener and not listener.error and not listener.ended.is_set():
+            if not listener.ended.wait(timeout=5):
+                print("[경고] session_ended 를 받지 못했습니다")
+
+    confidences = fetch_confidences_ro(args.db, session_id)
+    if confidences is None:
+        print("[신뢰도] DB를 읽을 수 없어 건너뜀")
+    else:
+        transcripts = listener.transcripts if listener else {}
+        with open(run_dir / "confidence.csv", "w", newline="", encoding="utf-8-sig") as f:
+            wr = csv.writer(f)
+            wr.writerow(["seq", "stt_confidence", "transcript"])
+            for seq in sorted(confidences):
+                wr.writerow([seq, confidences[seq], transcripts.get(seq)])
+
+        values = [v for v in confidences.values() if v is not None]
+        missing = len(confidences) - len(values)
+        summary = f"[신뢰도] {len(confidences)}개 청크"
+        if values:
+            summary += (f" · 평균 {sum(values) / len(values):.3f}"
+                        f" · 최저 {min(values):.3f} · 최고 {max(values):.3f}")
+        summary += f" · 값 없음 {missing}개"
+        print(summary)
+
     sm = stats["send_ms"]
-    print(f"[요약] 전송 {len(chunks)}개, 실패 {stats['failed']}개"
-          + (f", SSE 수신 {listener.count}개" if listener else ""))
+    summary = f"[요약] 전송 {len(chunks)}개, 실패 {stats['failed']}개"
+    if listener:
+        success = sum(1 for t in listener.transcripts.values() if t)
+        summary += f", SSE 수신 {listener.count}개, 인식 성공 {success}개"
+    print(summary)
     if sm:
         print(f"[속도] 전송 소요 평균 {sum(sm) / len(sm):.0f}ms · 최대 {max(sm):.0f}ms"
               + ("" if args.fast else f" | 예정 대비 전송 지연 최대 {max(stats['delays']):.0f}ms"))
